@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/crewjam/saml"
-	"github.com/crewjam/saml/samlsp"
 	"github.com/gorilla/mux"
 	xrv "github.com/mattermost/xml-roundtrip-validator"
 	responsewriter "github.com/rancher/apiserver/pkg/middleware"
@@ -58,6 +57,8 @@ func InitializeSamlServiceProvider(configToSet *v32.SamlConfig, name string) err
 	var cert *x509.Certificate
 	var err error
 	var ok bool
+
+	log.Debugf("SAML [InitializeSamlServiceProvider]: Validating input for provider %v", name)
 
 	if configToSet.IDPMetadataContent == "" {
 		return fmt.Errorf("SAML: Cannot initialize saml SP properly, missing IDP URL/metadata in the config %v", configToSet)
@@ -115,7 +116,12 @@ func InitializeSamlServiceProvider(configToSet *v32.SamlConfig, name string) err
 		}
 	}
 
-	provider := SamlProviders[name]
+	provider, ok := SamlProviders[name]
+	if !ok {
+		return fmt.Errorf("SAML [InitializeSamlServiceProvider]: Provider %v not configured", name)
+	}
+
+	log.Debugf("SAML [InitializeSamlServiceProvider]: Initializing provider %v", name)
 
 	rancherAPIHost := strings.TrimRight(configToSet.RancherAPIHost, "/")
 	samlURL := rancherAPIHost + "/v1-saml/"
@@ -161,11 +167,12 @@ func InitializeSamlServiceProvider(configToSet *v32.SamlConfig, name string) err
 
 	provider.serviceProvider = &sp
 
-	cookieStore := samlsp.ClientCookies{
+	cookieStore := ClientCookies{
 		ServiceProvider: &sp,
 		Name:            "token",
 		Domain:          actURL.Host,
 	}
+
 	provider.clientState = &cookieStore
 
 	root.Use(responsewriter.ContentTypeOptions)

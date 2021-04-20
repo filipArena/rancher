@@ -47,9 +47,12 @@ import (
 )
 
 const (
-	defaultEngineInstallURL         = "https://releases.rancher.com/install-docker/17.03.2.sh"
-	amazonec2                       = "amazonec2"
-	userNodeRemoveCleanupAnnotation = "nodes.management.cattle.io/user-node-remove-cleanup"
+	defaultEngineInstallURL            = "https://releases.rancher.com/install-docker/17.03.2.sh"
+	amazonec2                          = "amazonec2"
+	userNodeRemoveCleanupAnnotation    = "cleanup.cattle.io/user-node-remove"
+	userNodeRemoveCleanupAnnotationOld = "nodes.management.cattle.io/user-node-remove-cleanup"
+	userNodeRemoveFinalizerPrefix      = "clusterscoped.controller.cattle.io/user-node-remove_"
+	userNodeRemoveAnnotationPrefix     = "lifecycle.cattle.io/create.user-node-remove_"
 )
 
 // aliases maps Schema field => driver field
@@ -64,6 +67,7 @@ var aliases = map[string]map[string]string{
 	"otc":           map[string]string{"privateKeyFile": "privateKeyFile"},
 	"packet":        map[string]string{"userdata": "userdata"},
 	"vmwarevsphere": map[string]string{"cloudConfig": "cloud-config"},
+	"google":        map[string]string{"authEncodedJson": "authEncodedJson"},
 }
 
 func Register(ctx context.Context, management *config.ManagementContext, clusterManager *clustermanager.Manager) {
@@ -81,6 +85,7 @@ func Register(ctx context.Context, management *config.ManagementContext, cluster
 		nodeClient:                nodeClient,
 		nodeTemplateClient:        management.Management.NodeTemplates(""),
 		nodePoolLister:            management.Management.NodePools("").Controller().Lister(),
+		nodePoolController:        management.Management.NodePools("").Controller(),
 		nodeTemplateGenericClient: management.Management.NodeTemplates("").ObjectClient().UnstructuredClient(),
 		configMapGetter:           management.K8sClient.CoreV1(),
 		clusterLister:             management.Management.Clusters("").Controller().Lister(),
@@ -92,6 +97,7 @@ func Register(ctx context.Context, management *config.ManagementContext, cluster
 	}
 
 	nodeClient.AddLifecycle(ctx, "node-controller", nodeLifecycle)
+	nodeClient.AddHandler(ctx, "node-controller-sync", nodeLifecycle.sync)
 }
 
 type Lifecycle struct {
@@ -102,6 +108,7 @@ type Lifecycle struct {
 	nodeClient                v3.NodeInterface
 	nodeTemplateClient        v3.NodeTemplateInterface
 	nodePoolLister            v3.NodePoolLister
+	nodePoolController        v3.NodePoolController
 	configMapGetter           typedv1.ConfigMapsGetter
 	clusterLister             v3.ClusterLister
 	schemaLister              v3.DynamicSchemaLister
@@ -218,7 +225,7 @@ func (m *Lifecycle) getNodePool(nodePoolName string) (*v3.NodePool, error) {
 
 func (m *Lifecycle) Remove(obj *v3.Node) (runtime.Object, error) {
 	if obj.Status.NodeTemplateSpec == nil {
-		return obj, nil
+		return m.deleteV1Node(obj)
 	}
 
 	newObj, err := v32.NodeConditionRemoved.DoUntilTrue(obj, func() (runtime.Object, error) {
@@ -426,8 +433,9 @@ func (m *Lifecycle) deployAgent(nodeDir string, obj *v3.Node) error {
 // this enables the agent image to be pulled from the private registry
 func (m *Lifecycle) authenticateRegistry(nodeDir string, node *v3.Node, cluster *v3.Cluster) error {
 	reg := util.GetPrivateRepo(cluster)
-	if reg == nil {
-		return nil // if there is no private registry defined, return since auth is not needed
+	// if there is no private registry defined or there is a registry without credentials, return since auth is not needed
+	if reg == nil || reg.User == "" || reg.Password == "" {
+		return nil
 	}
 
 	logrus.Infof("[node-controller-rancher-machine] private registry detected, authenticating %s to %s", node.Spec.RequestedHostname, reg.URL)
@@ -499,12 +507,20 @@ outer:
 	return obj, err
 }
 
-func (m *Lifecycle) Updated(obj *v3.Node) (runtime.Object, error) {
+func (m *Lifecycle) sync(key string, obj *v3.Node) (runtime.Object, error) {
+	if obj == nil || obj.DeletionTimestamp != nil {
+		return nil, nil
+	}
+
 	if cleanupAnnotation, ok := obj.Annotations[userNodeRemoveCleanupAnnotation]; !ok || cleanupAnnotation != "true" {
 		// finalizer from user-node-remove has to be checked/cleaned
 		return m.userNodeRemoveCleanup(obj)
 	}
 
+	return obj, nil
+}
+
+func (m *Lifecycle) Updated(obj *v3.Node) (runtime.Object, error) {
 	newObj, err := v32.NodeConditionProvisioned.Once(obj, func() (runtime.Object, error) {
 		if obj.Status.NodeTemplateSpec == nil {
 			m.setWaiting(obj)
@@ -823,7 +839,12 @@ func (m *Lifecycle) drainNode(node *v3.Node) error {
 		return err
 	}
 
-	if !nodehelper.DrainBeforeDelete(nodeCopy, cluster) {
+	nodePool, err := m.getNodePool(node.Spec.NodePoolName)
+	if err != nil && !kerror.IsNotFound(err) {
+		return err
+	}
+
+	if !nodehelper.DrainBeforeDelete(nodeCopy, cluster, nodePool) {
 		return nil
 	}
 
@@ -837,8 +858,8 @@ func (m *Lifecycle) drainNode(node *v3.Node) error {
 		logrus.Debugf("node [%s] has no NodeDrainInput, creating one with 60s timeout",
 			nodeCopy.Spec.RequestedHostname)
 		nodeCopy.Spec.NodeDrainInput = &rketypes.NodeDrainInput{
-			Force:           false,
-			DeleteLocalData: false,
+			Force:           true,
+			DeleteLocalData: true,
 			GracePeriod:     60,
 			Timeout:         60,
 		}
@@ -876,34 +897,40 @@ func (m *Lifecycle) drainNode(node *v3.Node) error {
 }
 
 func (m *Lifecycle) userNodeRemoveCleanup(obj *v3.Node) (runtime.Object, error) {
-	copy := obj.DeepCopy()
-	copy.Annotations[userNodeRemoveCleanupAnnotation] = "true"
-	if hasFinalizerWithPrefix(copy, "clusterscoped.controller.cattle.io/user-node-remove_") {
-		// user-node-remove controller functionality is now merged into this controller
-		logrus.Infof("node [%s] has a finalizer for user-node-remove controller and it will be removed",
-			copy.Spec.RequestedHostname)
-		copy = removeFinalizerWithPrefix(copy, "clusterscoped.controller.cattle.io/user-node-remove_")
+	newObj := obj.DeepCopy()
+	newObj.SetFinalizers(removeFinalizerWithPrefix(newObj.GetFinalizers(), userNodeRemoveFinalizerPrefix))
+
+	annos := newObj.GetAnnotations()
+	if annos == nil {
+		annos = make(map[string]string)
+	} else {
+		annos = removeAnnotationWithPrefix(annos, userNodeRemoveAnnotationPrefix)
+		delete(annos, userNodeRemoveCleanupAnnotationOld)
 	}
-	return m.nodeClient.Update(copy)
+
+	annos[userNodeRemoveCleanupAnnotation] = "true"
+	newObj.SetAnnotations(annos)
+	return m.nodeClient.Update(newObj)
 }
 
-func hasFinalizerWithPrefix(node *v3.Node, prefix string) bool {
-	for _, finalizer := range node.Finalizers {
+func removeFinalizerWithPrefix(finalizers []string, prefix string) []string {
+	var nf []string
+	for _, finalizer := range finalizers {
 		if strings.HasPrefix(finalizer, prefix) {
-			return true
-		}
-	}
-	return false
-}
-
-func removeFinalizerWithPrefix(node *v3.Node, prefix string) *v3.Node {
-	var newFinalizers []string
-	for _, finalizer := range node.Finalizers {
-		if strings.HasPrefix(finalizer, prefix) {
+			logrus.Debugf("a finalizer with prefix %s will be removed", prefix)
 			continue
 		}
-		newFinalizers = append(newFinalizers, finalizer)
+		nf = append(nf, finalizer)
 	}
-	node.SetFinalizers(newFinalizers)
-	return node
+	return nf
+}
+
+func removeAnnotationWithPrefix(annotations map[string]string, prefix string) map[string]string {
+	for k := range annotations {
+		if strings.HasPrefix(k, prefix) {
+			logrus.Debugf("annotation with prefix %s will be removed", prefix)
+			delete(annotations, k)
+		}
+	}
+	return annotations
 }

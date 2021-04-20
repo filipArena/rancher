@@ -30,10 +30,10 @@ var (
 	CLIURLLinux                       = NewSetting("cli-url-linux", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-linux-amd64-v1.0.0-alpha8.tar.gz")
 	CLIURLWindows                     = NewSetting("cli-url-windows", "https://releases.rancher.com/cli/v1.0.0-alpha8/rancher-windows-386-v1.0.0-alpha8.zip")
 	ClusterControllerStartCount       = NewSetting("cluster-controller-start-count", "50")
-	EngineInstallURL                  = NewSetting("engine-install-url", "https://releases.rancher.com/install-docker/19.03.sh")
+	EngineInstallURL                  = NewSetting("engine-install-url", "https://releases.rancher.com/install-docker/20.10.sh")
 	EngineISOURL                      = NewSetting("engine-iso-url", "https://releases.rancher.com/os/latest/rancheros-vmware.iso")
 	EngineNewestVersion               = NewSetting("engine-newest-version", "v17.12.0")
-	EngineSupportedRange              = NewSetting("engine-supported-range", "~v1.11.2 || ~v1.12.0 || ~v1.13.0 || ~v17.03.0 || ~v17.06.0 || ~v17.09.0 || ~v18.06.0 || ~v18.09.0 || ~v19.03.0 ")
+	EngineSupportedRange              = NewSetting("engine-supported-range", "~v1.11.2 || ~v1.12.0 || ~v1.13.0 || ~v17.03.0 || ~v17.06.0 || ~v17.09.0 || ~v18.06.0 || ~v18.09.0 || ~v19.03.0 || ~v20.10.0 ")
 	FirstLogin                        = NewSetting("first-login", "true")
 	GlobalRegistryEnabled             = NewSetting("global-registry-enabled", "false")
 	GithubProxyAPIURL                 = NewSetting("github-proxy-api-url", "https://api.github.com")
@@ -86,15 +86,21 @@ var (
 	ClusterTemplateEnforcement        = NewSetting("cluster-template-enforcement", "false")
 	InitialDockerRootDir              = NewSetting("initial-docker-root-dir", "/var/lib/docker")
 	SystemCatalog                     = NewSetting("system-catalog", "external") // Options are 'external' or 'bundled'
-	ChartDefaultBranch                = NewSetting("chart-default-branch", "dev-v2.5-alt")
+	ChartDefaultBranch                = NewSetting("chart-default-branch", "dev-v2.5")
 	PartnerChartDefaultBranch         = NewSetting("partner-chart-default-branch", "main")
 	FleetDefaultWorkspaceName         = NewSetting("fleet-default-workspace-name", "fleet-default") // fleetWorkspaceName to assign to clusters with none
-	ShellImage                        = NewSetting("shell-image", "rancher/shell:v0.1.5")
+	ShellImage                        = NewSetting("shell-image", "rancher/shell:v0.1.6")
 	IgnoreNodeName                    = NewSetting("ignore-node-name", "") // nodes to ignore when syncing v1.node to v3.node
 	NoDefaultAdmin                    = NewSetting("no-default-admin", "")
 	RestrictedDefaultAdmin            = NewSetting("restricted-default-admin", "false") // When bootstrapping the admin for the first time, give them the global role restricted-admin
-	EKSUpstreamRefreshCron            = NewSetting("eks-refresh-cron", "*/5 * * * *")
+	EKSUpstreamRefreshCron            = NewSetting("eks-refresh-cron", "*/5 * * * *")   // EKSUpstreamRefreshCron is deprecated and will be replaced by EKSUpstreamRefresh
+	EKSUpstreamRefresh                = NewSetting("eks-refresh", "300")
+	GKEUpstreamRefresh                = NewSetting("gke-refresh", "300")
 	HideLocalCluster                  = NewSetting("hide-local-cluster", "false")
+
+	FleetMinVersion           = NewSetting("fleet-min-version", "")
+	RancherOperatorMinVersion = NewSetting("rancher-operator-min-version", "")
+	RancherWebhookMinVersion  = NewSetting("rancher-webhook-min-version", "")
 )
 
 func FullShellImage() string {
@@ -228,4 +234,13 @@ func getMetadataConfig() string {
 		return ""
 	}
 	return string(ans)
+}
+
+// GetSettingByID returns a setting that is stored with the given id
+func GetSettingByID(id string) string {
+	if provider == nil {
+		s := settings[id]
+		return s.Default
+	}
+	return provider.Get(id)
 }

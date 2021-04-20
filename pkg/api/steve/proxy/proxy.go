@@ -8,7 +8,6 @@ import (
 	"time"
 
 	gmux "github.com/gorilla/mux"
-	"github.com/rancher/rancher/pkg/features"
 	v3 "github.com/rancher/rancher/pkg/generated/controllers/management.cattle.io/v3"
 	managementv3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
 	"github.com/rancher/rancher/pkg/settings"
@@ -26,7 +25,6 @@ import (
 type Handler struct {
 	authorizer    authorizer.Authorizer
 	dialerFactory ClusterDialerFactory
-	clusters      v3.ClusterCache
 }
 
 type ClusterDialerFactory interface {
@@ -66,10 +64,10 @@ func NewProxyMiddleware(sar v1.SubjectAccessReviewInterface,
 
 	mux := gmux.NewRouter()
 	mux.UseEncodedPath()
-	mux.Path("/v1/management.cattle.io.clusters/{clusterID}").Queries("link", "shell").HandlerFunc(routeToShellProxy(localSupport, localCluster, mux, proxyHandler))
-	mux.Path("/v3/clusters/{clusterID}").Queries("shell", "true").HandlerFunc(routeToShellProxy(localSupport, localCluster, mux, proxyHandler))
-	mux.Path("/{prefix:k8s/clusters/[^/]+}{suffix:/v1.*}").MatcherFunc(proxyHandler.MatchNonLegacy("/k8s/clusters/", true)).Handler(proxyHandler)
-	mux.Path("/{prefix:k8s/clusters/[^/]+}{suffix:.*}").MatcherFunc(proxyHandler.MatchNonLegacy("/k8s/clusters/", false)).Handler(proxyHandler)
+	mux.Path("/v1/management.cattle.io.clusters/{clusterID}").Queries("link", "shell").HandlerFunc(routeToShellProxy("link", "shell", localSupport, localCluster, mux, proxyHandler))
+	mux.Path("/v1/management.cattle.io.clusters/{clusterID}").Queries("action", "apply").HandlerFunc(routeToShellProxy("action", "apply", localSupport, localCluster, mux, proxyHandler))
+	mux.Path("/v3/clusters/{clusterID}").Queries("shell", "true").HandlerFunc(routeToShellProxy("link", "shell", localSupport, localCluster, mux, proxyHandler))
+	mux.Path("/{prefix:k8s/clusters/[^/]+}{suffix:/v1.*}").MatcherFunc(proxyHandler.MatchNonLegacy("/k8s/clusters/")).Handler(proxyHandler)
 
 	return func(handler http.Handler) http.Handler {
 		return http.HandlerFunc(func(rw http.ResponseWriter, req *http.Request) {
@@ -79,14 +77,14 @@ func NewProxyMiddleware(sar v1.SubjectAccessReviewInterface,
 	}, nil
 }
 
-func routeToShellProxy(localSupport bool, localCluster http.Handler, mux *gmux.Router, proxyHandler *Handler) func(rw http.ResponseWriter, r *http.Request) {
+func routeToShellProxy(key, value string, localSupport bool, localCluster http.Handler, mux *gmux.Router, proxyHandler *Handler) func(rw http.ResponseWriter, r *http.Request) {
 	return func(rw http.ResponseWriter, r *http.Request) {
 		vars := gmux.Vars(r)
 		cluster := vars["clusterID"]
 		if cluster == "local" {
 			if localSupport {
 				q := r.URL.Query()
-				q.Set("link", "shell")
+				q.Set(key, value)
 				r.URL.RawQuery = q.Encode()
 				r.URL.Path = "/v1/management.cattle.io.clusters/local"
 				localCluster.ServeHTTP(rw, r)
@@ -97,9 +95,8 @@ func routeToShellProxy(localSupport bool, localCluster http.Handler, mux *gmux.R
 		}
 		vars["prefix"] = "k8s/clusters/" + cluster
 		vars["suffix"] = "/v1/management.cattle.io.clusters/local"
-		// Ensure shell link is set
 		q := r.URL.Query()
-		q.Set("link", "shell")
+		q.Set(key, value)
 		r.URL.RawQuery = q.Encode()
 		r.URL.Path = "/k8s/clusters/" + cluster + "/v1/management.cattle.io.clusters/local"
 		proxyHandler.ServeHTTP(rw, r)
@@ -112,16 +109,11 @@ func NewProxyHandler(authorizer authorizer.Authorizer,
 	return &Handler{
 		authorizer:    authorizer,
 		dialerFactory: dialerFactory,
-		clusters:      clusters,
 	}
 }
 
-func (h *Handler) MatchNonLegacy(prefix string, force bool) gmux.MatcherFunc {
+func (h *Handler) MatchNonLegacy(prefix string) gmux.MatcherFunc {
 	return func(req *http.Request, match *gmux.RouteMatch) bool {
-		if !features.SteveProxy.Enabled() && !force {
-			return false
-		}
-
 		clusterID := strings.TrimPrefix(req.URL.Path, prefix)
 		clusterID = strings.SplitN(clusterID, "/", 2)[0]
 		if match.Vars == nil {

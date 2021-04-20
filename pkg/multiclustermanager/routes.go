@@ -10,6 +10,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/rancher/rancher/pkg/api/norman"
 	"github.com/rancher/rancher/pkg/api/norman/customization/clusterregistrationtokens"
+	"github.com/rancher/rancher/pkg/api/norman/customization/gke"
 	"github.com/rancher/rancher/pkg/api/norman/customization/oci"
 	"github.com/rancher/rancher/pkg/api/norman/customization/vsphere"
 	managementapi "github.com/rancher/rancher/pkg/api/norman/server"
@@ -40,6 +41,7 @@ func router(ctx context.Context, localClusterEnabled bool, scaledContext *config
 		k8sProxy             = k8sProxyPkg.New(scaledContext, scaledContext.Dialer)
 		connectHandler       = scaledContext.Dialer.(*rancherdialer.Factory).TunnelServer
 		connectConfigHandler = rkenodeconfigserver.Handler(scaledContext.Dialer.(*rancherdialer.Factory).TunnelAuthorizer, scaledContext)
+		clusterImport        = clusterregistrationtokens.ClusterImport{Clusters: scaledContext.Management.Clusters("")}
 	)
 
 	tokenAPI, err := tokens.NewAPIHandler(ctx, scaledContext, norman.ConfigureAPIUI)
@@ -57,6 +59,8 @@ func router(ctx context.Context, localClusterEnabled bool, scaledContext *config
 		return nil, err
 	}
 
+	metricsHandler := metrics.NewMetricsHandler(scaledContext, clusterManager, promhttp.Handler())
+
 	// Unauthenticated routes
 	unauthed := mux.NewRouter()
 	unauthed.UseEncodedPath()
@@ -65,7 +69,7 @@ func router(ctx context.Context, localClusterEnabled bool, scaledContext *config
 	unauthed.Handle("/v3/connect/config", connectConfigHandler)
 	unauthed.Handle("/v3/connect", connectHandler)
 	unauthed.Handle("/v3/connect/register", connectHandler)
-	unauthed.Handle("/v3/import/{token}.yaml", http.HandlerFunc(clusterregistrationtokens.ClusterImportHandler))
+	unauthed.Handle("/v3/import/{token}_{clusterId}.yaml", http.HandlerFunc(clusterImport.ClusterImportHandler))
 	unauthed.Handle("/v3/settings/cacerts", managementAPI).MatcherFunc(onlyGet)
 	unauthed.Handle("/v3/settings/first-login", managementAPI).MatcherFunc(onlyGet)
 	unauthed.Handle("/v3/settings/ui-banners", managementAPI).MatcherFunc(onlyGet)
@@ -86,18 +90,14 @@ func router(ctx context.Context, localClusterEnabled bool, scaledContext *config
 
 	authed.Path("/meta/aksVersions").Handler(capabilities.NewAKSVersionsHandler())
 	authed.Path("/meta/aksVirtualNetworks").Handler(capabilities.NewAKSVirtualNetworksHandler())
-	authed.Path("/meta/gkeMachineTypes").Handler(capabilities.NewGKEMachineTypesHandler())
-	authed.Path("/meta/gkeNetworks").Handler(capabilities.NewGKENetworksHandler())
-	authed.Path("/meta/gkeServiceAccounts").Handler(capabilities.NewGKEServiceAccountsHandler())
-	authed.Path("/meta/gkeSubnetworks").Handler(capabilities.NewGKESubnetworksHandler())
-	authed.Path("/meta/gkeVersions").Handler(capabilities.NewGKEVersionsHandler())
-	authed.Path("/meta/gkeZones").Handler(capabilities.NewGKEZonesHandler())
+	authed.Path("/meta/{resource:gke.+}").Handler(gke.NewGKEHandler(scaledContext))
 	authed.Path("/meta/oci/{resource}").Handler(oci.NewOCIHandler(scaledContext))
 	authed.Path("/meta/vsphere/{field}").Handler(vsphere.NewVsphereHandler(scaledContext))
 	authed.Path("/v3/tokenreview").Methods(http.MethodPost).Handler(&webhook.TokenReviewer{})
+	authed.Path("/metrics").Handler(metricsHandler)
+	authed.Path("/metrics/{clusterID}").Handler(metricsHandler)
 	authed.PathPrefix("/k8s/clusters/").Handler(k8sProxy)
 	authed.PathPrefix("/meta/proxy").Handler(httpproxy.NewProxy("/proxy/", whitelist.Proxy.Get, scaledContext))
-	authed.PathPrefix("/metrics").Handler(metrics.NewMetricsHandler(scaledContext, promhttp.Handler()))
 	authed.PathPrefix("/v1-telemetry").Handler(telemetry.NewProxy())
 	authed.PathPrefix("/v3/identit").Handler(tokenAPI)
 	authed.PathPrefix("/v3/token").Handler(tokenAPI)

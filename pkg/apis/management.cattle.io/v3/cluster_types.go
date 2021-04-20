@@ -6,6 +6,7 @@ import (
 	"strings"
 
 	eksv1 "github.com/rancher/eks-operator/pkg/apis/eks.cattle.io/v1"
+	gkev1 "github.com/rancher/gke-operator/pkg/apis/gke.cattle.io/v1"
 	"github.com/rancher/norman/condition"
 	"github.com/rancher/norman/types"
 	rketypes "github.com/rancher/rke/types"
@@ -77,6 +78,7 @@ const (
 	ClusterDriverK3os     = "k3os"
 	ClusterDriverRke2     = "rke2"
 	ClusterDriverEKS      = "EKS"
+	ClusterDriverGKE      = "GKE"
 	ClusterDriverRancherD = "rancherd"
 )
 
@@ -101,6 +103,7 @@ type ClusterSpecBase struct {
 	DesiredAgentImage                    string                                  `json:"desiredAgentImage"`
 	DesiredAuthImage                     string                                  `json:"desiredAuthImage"`
 	AgentImageOverride                   string                                  `json:"agentImageOverride"`
+	AgentEnvVars                         []v1.EnvVar                             `json:"agentEnvVars,omitempty"`
 	RancherKubernetesEngineConfig        *rketypes.RancherKubernetesEngineConfig `json:"rancherKubernetesEngineConfig,omitempty"`
 	DefaultPodSecurityPolicyTemplateName string                                  `json:"defaultPodSecurityPolicyTemplateName,omitempty" norman:"type=reference[podSecurityPolicyTemplate]"`
 	DefaultClusterRoleForProjectMembers  string                                  `json:"defaultClusterRoleForProjectMembers,omitempty" norman:"type=reference[roleTemplate]"`
@@ -126,6 +129,7 @@ type ClusterSpec struct {
 	AmazonElasticContainerServiceConfig *MapStringInterface         `json:"amazonElasticContainerServiceConfig,omitempty"`
 	GenericEngineConfig                 *MapStringInterface         `json:"genericEngineConfig,omitempty"`
 	EKSConfig                           *eksv1.EKSClusterConfigSpec `json:"eksConfig,omitempty"`
+	GKEConfig                           *gkev1.GKEClusterConfigSpec `json:"gkeConfig,omitempty"`
 	ClusterTemplateName                 string                      `json:"clusterTemplateName,omitempty" norman:"type=reference[clusterTemplate],nocreate,noupdate"`
 	ClusterTemplateRevisionName         string                      `json:"clusterTemplateRevisionName,omitempty" norman:"type=reference[clusterTemplateRevision]"`
 	ClusterTemplateAnswers              Answer                      `json:"answers,omitempty"`
@@ -146,6 +150,7 @@ type ClusterStatus struct {
 	Driver                               string                      `json:"driver"`
 	Provider                             string                      `json:"provider"`
 	AgentImage                           string                      `json:"agentImage"`
+	AppliedAgentEnvVars                  []v1.EnvVar                 `json:"appliedAgentEnvVars,omitempty"`
 	AgentFeatures                        map[string]bool             `json:"agentFeatures,omitempty"`
 	AuthImage                            string                      `json:"authImage"`
 	ComponentStatuses                    []ClusterComponentStatus    `json:"componentStatuses,omitempty"`
@@ -170,6 +175,7 @@ type ClusterStatus struct {
 	ScheduledClusterScanStatus           *ScheduledClusterScanStatus `json:"scheduledClusterScanStatus,omitempty"`
 	CurrentCisRunName                    string                      `json:"currentCisRunName,omitempty"`
 	EKSStatus                            EKSStatus                   `json:"eksStatus,omitempty" norman:"nocreate,noupdate"`
+	GKEStatus                            GKEStatus                   `json:"gkeStatus,omitempty" norman:"nocreate,noupdate"`
 }
 
 type ClusterComponentStatus struct {
@@ -356,4 +362,9 @@ type EKSStatus struct {
 	PrivateRequiresTunnel         *bool                       `json:"privateRequiresTunnel"`
 	ManagedLaunchTemplateID       string                      `json:"managedLaunchTemplateID"`
 	ManagedLaunchTemplateVersions map[string]string           `json:"managedLaunchTemplateVersions"`
+}
+
+type GKEStatus struct {
+	UpstreamSpec          *gkev1.GKEClusterConfigSpec `json:"upstreamSpec"`
+	PrivateRequiresTunnel *bool                       `json:"privateRequiresTunnel"`
 }

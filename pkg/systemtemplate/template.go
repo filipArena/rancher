@@ -44,7 +44,7 @@ metadata:
 
 ---
 
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: cattle-admin-binding
@@ -193,6 +193,11 @@ spec:
             value: "true"
           - name: CATTLE_K8S_MANAGED
             value: "true"
+          - name: CATTLE_CLUSTER_REGISTRY
+            value: "{{.ClusterRegistry}}" 
+      {{- if .AgentEnvVars}}
+{{ .AgentEnvVars | indent 10 }}
+      {{- end }}
           image: {{.AgentImage}}
           volumeMounts:
           - name: cattle-credentials
@@ -213,10 +218,9 @@ spec:
         secret:
           secretName: cattle-credentials-{{.TokenKey}}
           defaultMode: 320
+{{ if .IsRKE }}
 
 ---
-
-{{ if .IsRKE }}
 
 apiVersion: apps/v1
 kind: DaemonSet
@@ -264,6 +268,9 @@ spec:
           value: "true"
         - name: CATTLE_AGENT_CONNECT
           value: "true"
+      {{- if .AgentEnvVars}}
+{{ .AgentEnvVars | indent 8 }}
+      {{- end }}
         volumeMounts:
         - name: cattle-credentials
           mountPath: /cattle-credentials
