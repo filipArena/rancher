@@ -124,6 +124,7 @@ def test_validate_existing_wl_with_secret():
 # It's hard to find an App to support Windows case for now.
 # Could we make an App to support both Windows and Linux?
 @skip_test_windows_os
+@skip_test_hardened
 @if_post_upgrade
 @pytest.mark.run(order=2)
 def test_validate_existing_catalog_app():
@@ -167,6 +168,7 @@ def test_modify_workload_validate_secret():
 # It's hard to find an App to support Windows case for now.
 # Could we make an App to support both Windows and Linux?
 @skip_test_windows_os
+@skip_test_hardened
 @if_post_upgrade
 @pytest.mark.run(order=3)
 def test_modify_catalog_app():
@@ -214,7 +216,7 @@ def test_create_and_validate_ingress_xip_io_wl():
 
 # It's hard to find an App to support Windows case for now.
 # Could we make an App to support both Windows and Linux?
-@skip_test_windows_os
+@skip_test_hardened
 @pytest.mark.run(order=5)
 def test_create_and_validate_catalog_app():
     create_and_validate_catalog_app()
@@ -645,13 +647,21 @@ def upgrade_cluster():
     print("Upgrading cluster {} to version {}".format(
         CLUSTER_NAME, CLUSTER_VERSION))
     client, cluster = get_user_client_and_cluster()
-    if cluster.k3sConfig:
+    if "k3sConfig" in cluster:
         k3s_config = cluster.k3sConfig
         k3s_updated_config = k3s_config.copy()
         k3s_updated_config["kubernetesVersion"] = CLUSTER_VERSION
         client.update(cluster, name=cluster.name, k3sConfig=k3s_updated_config)
         cluster = get_cluster_by_name(client, CLUSTER_NAME)
         assert cluster.k3sConfig["kubernetesVersion"] == CLUSTER_VERSION
+    elif "rke2Config" in cluster:
+        rke2_config = cluster.rke2Config
+        rke2_updated_config = rke2_config.copy()
+        rke2_updated_config["kubernetesVersion"] = CLUSTER_VERSION
+        client.update(cluster, name=cluster.name,
+                      rke2Config=rke2_updated_config)
+        cluster = get_cluster_by_name(client, CLUSTER_NAME)
+        assert cluster.rke2Config["kubernetesVersion"] == CLUSTER_VERSION
 
 
 def wait_for_ready_nodes():

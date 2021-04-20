@@ -10,19 +10,22 @@ import (
 	"github.com/rancher/rancher/pkg/controllers/managementagent/dnsrecord"
 	"github.com/rancher/rancher/pkg/controllers/managementagent/externalservice"
 	"github.com/rancher/rancher/pkg/controllers/managementagent/ingress"
-	"github.com/rancher/rancher/pkg/controllers/managementagent/monitoring"
 	"github.com/rancher/rancher/pkg/controllers/managementagent/nslabels"
 	"github.com/rancher/rancher/pkg/controllers/managementagent/servicemonitor"
 	"github.com/rancher/rancher/pkg/controllers/managementagent/targetworkloadservice"
 	"github.com/rancher/rancher/pkg/controllers/managementagent/workload"
+	"github.com/rancher/rancher/pkg/controllers/managementuserlegacy/monitoring"
+	"github.com/rancher/rancher/pkg/features"
 	pkgmonitoring "github.com/rancher/rancher/pkg/monitoring"
 	"github.com/rancher/rancher/pkg/schemas/factory"
 	"github.com/rancher/rancher/pkg/types/config"
 )
 
 func Register(ctx context.Context, cluster *config.UserOnlyContext) error {
-	if err := createUserClusterCRDs(ctx, cluster); err != nil {
-		return err
+	if features.Legacy.Enabled() {
+		if err := createUserClusterCRDs(ctx, cluster); err != nil {
+			return err
+		}
 	}
 
 	dnsrecord.Register(ctx, cluster)

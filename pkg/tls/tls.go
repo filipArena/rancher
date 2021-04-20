@@ -18,13 +18,16 @@ import (
 	"github.com/rancher/dynamiclistener/server"
 	"github.com/rancher/dynamiclistener/storage/kubernetes"
 	"github.com/rancher/norman/types/convert"
+	"github.com/rancher/rancher/pkg/namespace"
 	"github.com/rancher/rancher/pkg/settings"
 	"github.com/rancher/wrangler/pkg/generated/controllers/core"
 	corev1controllers "github.com/rancher/wrangler/pkg/generated/controllers/core/v1"
 	"github.com/sirupsen/logrus"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/rest"
 )
@@ -57,8 +60,26 @@ func ListenAndServe(ctx context.Context, restConfig *rest.Config, handler http.H
 
 	migrateConfig(ctx, restConfig, opts)
 
-	if err := server.ListenAndServe(ctx, httpsPort, httpPort, handler, opts); err != nil {
-		return err
+	backoff := wait.Backoff{
+		Duration: 100 * time.Millisecond,
+		Factor:   2,
+		Steps:    3,
+	}
+
+	// Try listen and serve over if there is an already exist error which comes from
+	// creating the ca. Rancher will hit this error during HA startup as all servers
+	// will race to create the ca secret.
+	err = wait.ExponentialBackoff(backoff, func() (bool, error) {
+		if err := server.ListenAndServe(ctx, httpsPort, httpPort, handler, opts); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	})
+	if err != nil {
+		return errors.Wrap(err, "failed to ListenAndServe")
 	}
 
 	internalPort := 0
@@ -66,15 +87,26 @@ func ListenAndServe(ctx context.Context, restConfig *rest.Config, handler http.H
 		internalPort = httpsPort + 1
 	}
 
-	if err := server.ListenAndServe(ctx, internalPort, 0, handler, &server.ListenOpts{
+	serverOptions := &server.ListenOpts{
 		Storage:       opts.Storage,
 		Secrets:       opts.Secrets,
 		CAName:        "tls-rancher-internal-ca",
-		CANamespace:   "cattle-system",
-		CertNamespace: "cattle-system",
+		CANamespace:   namespace.System,
+		CertNamespace: namespace.System,
 		CertName:      "tls-rancher-internal",
-	}); err != nil {
-		return err
+	}
+
+	err = wait.ExponentialBackoff(backoff, func() (bool, error) {
+		if err := server.ListenAndServe(ctx, internalPort, 0, handler, serverOptions); err != nil {
+			if apierrors.IsAlreadyExists(err) {
+				return false, nil
+			}
+			return false, err
+		}
+		return true, nil
+	})
+	if err != nil {
+		return errors.Wrap(err, "failed to ListenAndServe for fleet")
 	}
 
 	if err := core.Start(ctx, 5); err != nil {

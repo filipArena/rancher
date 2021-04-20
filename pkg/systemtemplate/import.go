@@ -1,6 +1,7 @@
 package systemtemplate
 
 import (
+	"bytes"
 	"crypto/md5"
 	"crypto/sha256"
 	"encoding/base64"
@@ -13,8 +14,10 @@ import (
 	apimgmtv3 "github.com/rancher/rancher/pkg/apis/management.cattle.io/v3"
 	util "github.com/rancher/rancher/pkg/cluster"
 	v3 "github.com/rancher/rancher/pkg/generated/norman/management.cattle.io/v3"
+	"github.com/rancher/rancher/pkg/image"
 	"github.com/rancher/rancher/pkg/settings"
 	"github.com/rancher/rke/templates"
+	"github.com/sirupsen/logrus"
 	corev1 "k8s.io/api/core/v1"
 )
 
@@ -27,6 +30,7 @@ type context struct {
 	Features              string
 	CAChecksum            string
 	AgentImage            string
+	AgentEnvVars          string
 	AuthImage             string
 	TokenKey              string
 	Token                 string
@@ -57,7 +61,7 @@ func toFeatureString(features map[string]bool) string {
 
 func SystemTemplate(resp io.Writer, agentImage, authImage, namespace, token, url string, isWindowsCluster bool,
 	cluster *v3.Cluster, features map[string]bool, taints []corev1.Taint) error {
-	var tolerations string
+	var tolerations, agentEnvVars string
 	d := md5.Sum([]byte(url + token + namespace))
 	tokenKey := hex.EncodeToString(d[:])[:7]
 
@@ -74,10 +78,15 @@ func SystemTemplate(resp io.Writer, agentImage, authImage, namespace, token, url
 		tolerations = templates.ToYAML(taints)
 	}
 
+	if cluster != nil && len(cluster.Spec.AgentEnvVars) > 0 {
+		agentEnvVars = templates.ToYAML(cluster.Spec.AgentEnvVars)
+	}
+
 	context := &context{
 		Features:              toFeatureString(features),
 		CAChecksum:            CAChecksum(),
 		AgentImage:            agentImage,
+		AgentEnvVars:          agentEnvVars,
 		AuthImage:             authImage,
 		TokenKey:              tokenKey,
 		Token:                 base64.StdEncoding.EncodeToString([]byte(token)),
@@ -93,6 +102,15 @@ func SystemTemplate(resp io.Writer, agentImage, authImage, namespace, token, url
 	return t.Execute(resp, context)
 }
 
+func ForCluster(cluster *v3.Cluster, token string) ([]byte, error) {
+	buf := &bytes.Buffer{}
+	err := SystemTemplate(buf, GetDesiredAgentImage(cluster),
+		GetDesiredAuthImage(cluster),
+		cluster.Name, token, settings.ServerURL.Get(), cluster.Spec.WindowsPreferedCluster,
+		cluster, nil, nil)
+	return buf.Bytes(), err
+}
+
 func CAChecksum() string {
 	ca := settings.CACerts.Get()
 	if ca != "" {
@@ -103,4 +121,29 @@ func CAChecksum() string {
 		return hex.EncodeToString(digest[:])
 	}
 	return ""
+}
+
+func GetDesiredAgentImage(cluster *v3.Cluster) string {
+	logrus.Tracef("clusterDeploy: deployAgent called for [%s]", cluster.Name)
+	desiredAgent := cluster.Spec.DesiredAgentImage
+	if cluster.Spec.AgentImageOverride != "" {
+		desiredAgent = cluster.Spec.AgentImageOverride
+	}
+	if desiredAgent == "" || desiredAgent == "fixed" {
+		desiredAgent = image.ResolveWithCluster(settings.AgentImage.Get(), cluster)
+	}
+	logrus.Tracef("clusterDeploy: deployAgent: desiredAgent is [%s] for cluster [%s]", desiredAgent, cluster.Name)
+	return desiredAgent
+}
+
+func GetDesiredAuthImage(cluster *v3.Cluster) string {
+	var desiredAuth string
+	if cluster.Spec.LocalClusterAuthEndpoint.Enabled {
+		desiredAuth = cluster.Spec.DesiredAuthImage
+		if desiredAuth == "" || desiredAuth == "fixed" {
+			desiredAuth = image.ResolveWithCluster(settings.AuthImage.Get(), cluster)
+		}
+	}
+	logrus.Tracef("clusterDeploy: deployAgent: desiredAuth is [%s] for cluster [%s]", desiredAuth, cluster.Name)
+	return desiredAuth
 }

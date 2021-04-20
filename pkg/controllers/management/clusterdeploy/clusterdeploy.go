@@ -237,6 +237,11 @@ func redeployAgent(cluster *v3.Cluster, desiredAgent, desiredAuth string, desire
 		return true
 	}
 
+	if !reflect.DeepEqual(cluster.Spec.AgentEnvVars, cluster.Status.AppliedAgentEnvVars) {
+		logrus.Infof("clusterDeploy: redeployAgent: redeploy Rancher agents due to agent env vars mismatched for [%s], was [%v] and will be [%v]", cluster.Name, cluster.Spec.AgentEnvVars, cluster.Status.AppliedAgentEnvVars)
+		return true
+	}
+
 	logrus.Tracef("clusterDeploy: redeployAgent: returning false for redeployAgent")
 
 	return false
@@ -255,22 +260,8 @@ func (cd *clusterDeploy) deployAgent(cluster *v3.Cluster) error {
 		return nil
 	}
 
-	logrus.Tracef("clusterDeploy: deployAgent called for [%s]", cluster.Name)
-	desiredAgent := getDesiredImage(cluster)
-	if desiredAgent == "" || desiredAgent == "fixed" {
-		desiredAgent = image.ResolveWithCluster(settings.AgentImage.Get(), cluster)
-	}
-	logrus.Tracef("clusterDeploy: deployAgent: desiredAgent is [%s] for cluster [%s]", desiredAgent, cluster.Name)
-
-	var desiredAuth string
-	if cluster.Spec.LocalClusterAuthEndpoint.Enabled {
-		desiredAuth = cluster.Spec.DesiredAuthImage
-		if desiredAuth == "" || desiredAuth == "fixed" {
-			desiredAuth = image.ResolveWithCluster(settings.AuthImage.Get(), cluster)
-		}
-	}
-	logrus.Tracef("clusterDeploy: deployAgent: desiredAuth is [%s] for cluster [%s]", desiredAuth, cluster.Name)
-
+	desiredAgent := systemtemplate.GetDesiredAgentImage(cluster)
+	desiredAuth := systemtemplate.GetDesiredAuthImage(cluster)
 	desiredFeatures := map[string]bool{}
 
 	logrus.Tracef("clusterDeploy: deployAgent: desiredFeatures is [%v] for cluster [%s]", desiredFeatures, cluster.Name)
@@ -363,6 +354,7 @@ func (cd *clusterDeploy) deployAgent(cluster *v3.Cluster) error {
 	if cluster.Annotations[AgentForceDeployAnn] == "true" {
 		cluster.Annotations[AgentForceDeployAnn] = "false"
 	}
+	cluster.Status.AppliedAgentEnvVars = cluster.Spec.AgentEnvVars
 
 	return nil
 }

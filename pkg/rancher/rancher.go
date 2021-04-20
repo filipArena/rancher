@@ -2,12 +2,14 @@ package rancher
 
 import (
 	"context"
+	"fmt"
 	"net/http"
 
 	responsewriter "github.com/rancher/apiserver/pkg/middleware"
 	"github.com/rancher/rancher/pkg/api/norman/customization/kontainerdriver"
 	"github.com/rancher/rancher/pkg/api/norman/customization/podsecuritypolicytemplate"
 	steveapi "github.com/rancher/rancher/pkg/api/steve"
+	"github.com/rancher/rancher/pkg/api/steve/aggregation"
 	"github.com/rancher/rancher/pkg/api/steve/proxy"
 	"github.com/rancher/rancher/pkg/auth"
 	"github.com/rancher/rancher/pkg/auth/audit"
@@ -19,6 +21,7 @@ import (
 	dashboarddata "github.com/rancher/rancher/pkg/data/dashboard"
 	"github.com/rancher/rancher/pkg/features"
 	"github.com/rancher/rancher/pkg/multiclustermanager"
+	"github.com/rancher/rancher/pkg/namespace"
 	"github.com/rancher/rancher/pkg/tls"
 	"github.com/rancher/rancher/pkg/ui"
 	"github.com/rancher/rancher/pkg/websocket"
@@ -47,7 +50,6 @@ type Options struct {
 	AuditLogMaxsize   int
 	AuditLogMaxbackup int
 	AuditLevel        int
-	Agent             bool
 	Features          string
 }
 
@@ -81,37 +83,31 @@ func New(ctx context.Context, clientConfg clientcmd.ClientConfig, opts *Options)
 		return nil, err
 	}
 
-	lockID := "cattle-controllers"
-	if opts.Agent {
-		lockID = "cattle-agent-controllers"
-	}
-
-	wranglerContext, err := wrangler.NewContext(ctx, lockID, clientConfg, restConfig)
+	wranglerContext, err := wrangler.NewContext(ctx, clientConfg, restConfig)
 	if err != nil {
 		return nil, err
 	}
 	wranglerContext.MultiClusterManager = newMCM(wranglerContext, opts)
-	wranglerContext.Agent = opts.Agent
 
 	podsecuritypolicytemplate.RegisterIndexers(wranglerContext)
 	kontainerdriver.RegisterIndexers(wranglerContext)
 	managementauth.RegisterWranglerIndexers(wranglerContext)
 
+	// Initialize Features as early as possible
+	if err := crds.CreateFeatureCRD(ctx, restConfig); err != nil {
+		return nil, err
+	}
+	features.InitializeFeatures(wranglerContext.Mgmt.Feature(), opts.Features)
+
 	if err := crds.Create(ctx, restConfig); err != nil {
 		return nil, err
 	}
 
-	// Initialize Features as early as possible
-	features.InitializeFeatures(wranglerContext.Mgmt.Feature(), opts.Features)
+	if features.MCM.Enabled() && !features.Fleet.Enabled() {
+		return nil, fmt.Errorf("multi-cluster-management features requires fleet=true")
+	}
 
-	if opts.Agent {
-		authServer, err = auth.NewHeaderAuth()
-		if err != nil {
-			return nil, err
-		}
-		features.MCM.Disable()
-		features.Fleet.Disable()
-	} else if features.Auth.Enabled() {
+	if features.Auth.Enabled() {
 		authServer, err = auth.NewServer(ctx, restConfig)
 		if err != nil {
 			return nil, err
@@ -124,17 +120,19 @@ func New(ctx context.Context, clientConfg clientcmd.ClientConfig, opts *Options)
 	}
 
 	steve, err := steveserver.New(ctx, restConfig, &steveserver.Options{
-		Controllers:     wranglerContext.Controllers,
-		AccessSetLookup: wranglerContext.ASL,
-		AuthMiddleware:  steveauth.ExistingContext,
-		Next:            ui.New(wranglerContext.Mgmt.Preference().Cache()),
+		Controllers:                wranglerContext.Controllers,
+		AccessSetLookup:            wranglerContext.ASL,
+		AuthMiddleware:             steveauth.ExistingContext,
+		AggregationSecretNamespace: namespace.System,
+		AggregationSecretName:      "steve-aggregation",
+		Next:                       ui.New(wranglerContext.Mgmt.Preference().Cache()),
 	})
 	if err != nil {
 		return nil, err
 	}
 
 	clusterProxy, err := proxy.NewProxyMiddleware(wranglerContext.K8s.AuthorizationV1().SubjectAccessReviews(),
-		wranglerContext.MultiClusterManager,
+		wranglerContext.TunnelServer.Dialer,
 		wranglerContext.Mgmt.Cluster().Cache(),
 		localClusterEnabled(opts),
 		steve,
@@ -143,6 +141,7 @@ func New(ctx context.Context, clientConfg clientcmd.ClientConfig, opts *Options)
 		return nil, err
 	}
 
+	additionalAPIPreMCM := steveapi.AdditionalAPIsPreMCM(wranglerContext)
 	additionalAPI, err := steveapi.AdditionalAPIs(ctx, wranglerContext, steve)
 	if err != nil {
 		return nil, err
@@ -150,6 +149,7 @@ func New(ctx context.Context, clientConfg clientcmd.ClientConfig, opts *Options)
 
 	auditLogWriter := audit.NewLogWriter(opts.AuditLogPath, opts.AuditLevel, opts.AuditLogMaxage, opts.AuditLogMaxbackup, opts.AuditLogMaxsize)
 	auditFilter := audit.NewAuditLogMiddleware(auditLogWriter)
+	aggregation := aggregation.NewMiddleware(ctx, wranglerContext.Mgmt.APIService(), wranglerContext.TunnelServer)
 
 	return &Rancher{
 		Auth: authServer.Authenticator.Chain(
@@ -159,6 +159,8 @@ func New(ctx context.Context, clientConfg clientcmd.ClientConfig, opts *Options)
 			websocket.NewWebsocketHandler,
 			proxy.RewriteLocalCluster,
 			clusterProxy,
+			aggregation,
+			additionalAPIPreMCM,
 			wranglerContext.MultiClusterManager.Middleware,
 			authServer.Management,
 			additionalAPI,
@@ -186,11 +188,18 @@ func (r *Rancher) Start(ctx context.Context) error {
 	}
 
 	r.Wrangler.OnLeader(func(ctx context.Context) error {
-		return r.Wrangler.StartWithTransaction(ctx, func(ctx context.Context) error {
-			if err := dashboarddata.Add(ctx, r.Wrangler, localClusterEnabled(r.opts), r.opts.AddLocal == "false", r.opts.Embedded); err != nil {
-				return err
-			}
+		if err := dashboarddata.Add(ctx, r.Wrangler, localClusterEnabled(r.opts), r.opts.AddLocal == "false", r.opts.Embedded); err != nil {
+			return err
+		}
+		err := r.Wrangler.StartWithTransaction(ctx, func(ctx context.Context) error {
 			return dashboard.Register(ctx, r.Wrangler)
+		})
+		if err != nil {
+			return err
+		}
+		return r.Wrangler.StartWithTransaction(ctx, func(ctx context.Context) error {
+			dashboard.RegisterFleet(ctx, r.Wrangler)
+			return nil
 		})
 	})
 

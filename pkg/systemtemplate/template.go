@@ -44,7 +44,7 @@ metadata:
 
 ---
 
-apiVersion: rbac.authorization.k8s.io/v1beta1
+apiVersion: rbac.authorization.k8s.io/v1
 kind: ClusterRoleBinding
 metadata:
   name: cattle-admin-binding
@@ -113,6 +113,8 @@ kind: Deployment
 metadata:
   name: cattle-cluster-agent
   namespace: cattle-system
+  annotations:
+    management.cattle.io/scale-available: "3"
 spec:
   selector:
     matchLabels:
@@ -193,17 +195,14 @@ spec:
             value: "true"
           - name: CATTLE_K8S_MANAGED
             value: "true"
+      {{- if .AgentEnvVars}}
+{{ .AgentEnvVars | indent 10 }}
+      {{- end }}
           image: {{.AgentImage}}
           volumeMounts:
           - name: cattle-credentials
             mountPath: /cattle-credentials
             readOnly: true
-          readinessProbe:
-            initialDelaySeconds: 2
-            periodSeconds: 5
-            httpGet:
-              path: /health
-              port: 8080
       {{- if .PrivateRegistryConfig}}
       imagePullSecrets:
       - name: cattle-private-registry
@@ -213,10 +212,9 @@ spec:
         secret:
           secretName: cattle-credentials-{{.TokenKey}}
           defaultMode: 320
+{{ if .IsRKE }}
 
 ---
-
-{{ if .IsRKE }}
 
 apiVersion: apps/v1
 kind: DaemonSet
@@ -264,6 +262,9 @@ spec:
           value: "true"
         - name: CATTLE_AGENT_CONNECT
           value: "true"
+      {{- if .AgentEnvVars}}
+{{ .AgentEnvVars | indent 8 }}
+      {{- end }}
         volumeMounts:
         - name: cattle-credentials
           mountPath: /cattle-credentials
@@ -437,6 +438,24 @@ spec:
                   values:
                     - windows
                 - key: node-role.kubernetes.io/controlplane
+                  operator: In
+                  values:
+                    - "true"
+              - matchExpressions:
+                - key: beta.kubernetes.io/os
+                  operator: NotIn
+                  values:
+                    - windows
+                - key: node-role.kubernetes.io/control-plane
+                  operator: In
+                  values:
+                    - "true"
+              - matchExpressions:
+                - key: beta.kubernetes.io/os
+                  operator: NotIn
+                  values:
+                    - windows
+                - key: node-role.kubernetes.io/master
                   operator: In
                   values:
                     - "true"
